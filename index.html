@@ -56,6 +56,15 @@ main{max-width:980px;margin:0 auto;padding:0 clamp(16px,4vw,28px);}
 .pill-outline{background:transparent;color:var(--teal);border:1.5px solid var(--teal);border-radius:999px;padding:8px 16px;font-weight:600;font-size:13.5px;}
 .primary{background:var(--coral);color:#fff;border-radius:999px;padding:13px 24px;font-weight:700;font-size:14.5px;}
 .ghost{background:transparent;color:var(--teal);border:1.5px solid var(--teal);border-radius:999px;padding:13px 24px;font-weight:600;font-size:14.5px;}
+
+.mic{width:46px;height:46px;border-radius:12px;border:1.5px solid var(--teal);background:transparent;color:var(--teal);display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.mic svg{width:20px;height:20px;}
+.mic.live{background:var(--coral);border-color:var(--coral);color:#fff;animation:pulse 1.6s infinite;}
+.vtoggle{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.14);color:#fff;border-radius:999px;padding:6px 11px;font-size:11.5px;font-weight:700;letter-spacing:.4px;border:none;cursor:pointer;transition:background .15s;}
+.vtoggle:hover{background:rgba(255,255,255,.24);}
+.vtoggle.on{background:var(--coral);}
+.vtoggle:focus-visible{outline:3px solid #fff;outline-offset:2px;}
+.mic-hint{font-size:12px;color:var(--coral);font-weight:600;padding:0 4px 9px;display:flex;align-items:center;gap:7px;}
 </style>
 </head>
 <body>
@@ -184,15 +193,22 @@ function levelFromScore(s){
 function esc(t){const d=document.createElement("div");d.textContent=t==null?"":String(t);return d.innerHTML;}
 function fmtTime(s){return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");}
 
+const MIC_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+const SPK_ON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>';
+const SPK_OFF = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>';
+
 /* ---------------- STATE ---------------- */
 const app = document.getElementById("app");
-let state = { view:"home", active:null, messages:[], thinking:false, seconds:0, timer:null, scoreData:null };
+let state = { view:"home", active:null, messages:[], thinking:false, seconds:0, timer:null, scoreData:null, listening:false, voiceOn:false };
+let recog = null;
 
 document.getElementById("logoBtn").onclick = ()=>{ if(state.view!=="call") go("home"); };
 document.getElementById("rubricBtn").onclick = openRubric;
 
 function go(view){
   if(state.timer){clearInterval(state.timer);state.timer=null;}
+  if(state.listening) stopMic();
+  if('speechSynthesis' in window) window.speechSynthesis.cancel();
   state.view = view;
   if(view==="home") renderHome();
   if(view==="call") renderCall();
@@ -257,7 +273,10 @@ function renderCall(){
           </div>
         </div>
       </div>
-      <span style="font-size:11.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;background:rgba(255,255,255,.14);border-radius:999px;padding:5px 11px;">${esc(s.num)} · ${esc(s.tag)}</span>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button id="voiceToggle" class="vtoggle" aria-pressed="false"></button>
+        <span style="font-size:11.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;background:rgba(255,255,255,.14);border-radius:999px;padding:5px 11px;">${esc(s.num)} · ${esc(s.tag)}</span>
+      </div>
     </div>
 
     <div style="background:#FFF6F4;border-left:3px solid ${C.coral};padding:10px 18px;font-size:13px;color:${C.ink};">
@@ -266,9 +285,13 @@ function renderCall(){
 
     <div id="transcript" style="background:${C.card};border:1px solid ${C.line};border-top:none;height:min(46vh,420px);overflow-y:auto;padding:20px 18px;display:flex;flex-direction:column;gap:12px;"></div>
 
-    <div style="background:${C.card};border:1px solid ${C.line};border-top:none;border-radius:0 0 16px 16px;padding:12px;display:flex;gap:10px;align-items:flex-end;">
-      <textarea id="input" rows="1" placeholder="Type what you'd say on the call…" style="flex:1;resize:none;border:1px solid ${C.line};border-radius:12px;padding:12px 14px;font-family:Inter,sans-serif;font-size:14.5px;line-height:1.4;max-height:120px;background:${C.paper};color:${C.ink};"></textarea>
-      <button id="sendBtn" class="btn" style="background:${C.teal};color:#fff;border-radius:12px;padding:12px 18px;font-weight:600;font-size:14.5px;">Say it</button>
+    <div style="background:${C.card};border:1px solid ${C.line};border-top:none;border-radius:0 0 16px 16px;padding:12px;">
+      <div id="micHint" class="mic-hint" style="display:none;"></div>
+      <div style="display:flex;gap:10px;align-items:flex-end;">
+        <button id="micBtn" class="btn mic" title="Speak your reply" aria-label="Speak your reply" aria-pressed="false">${MIC_SVG}</button>
+        <textarea id="input" rows="1" placeholder="Type what you'd say on the call…" style="flex:1;resize:none;border:1px solid ${C.line};border-radius:12px;padding:12px 14px;font-family:Inter,sans-serif;font-size:14.5px;line-height:1.4;max-height:120px;background:${C.paper};color:${C.ink};"></textarea>
+        <button id="sendBtn" class="btn" style="background:${C.teal};color:#fff;border-radius:12px;padding:12px 18px;font-weight:600;font-size:14.5px;">Say it</button>
+      </div>
     </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:12px;flex-wrap:wrap;">
@@ -299,6 +322,21 @@ function renderCall(){
   input.oninput = ()=>{ input.style.height="auto"; input.style.height=Math.min(input.scrollHeight,120)+"px"; };
   document.getElementById("leaveBtn").onclick = ()=> go("home");
   endBtn.onclick = endAndScore;
+
+  // voice output toggle
+  updateVoiceToggle();
+  document.getElementById("voiceToggle").onclick = ()=>{
+    state.voiceOn = !state.voiceOn;
+    if(!state.voiceOn && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    updateVoiceToggle();
+  };
+  // mic input
+  document.getElementById("micBtn").onclick = toggleMic;
+
+  // if the lead voice is on (e.g. on replay), speak the opening line
+  if(state.voiceOn && state.messages.length===1 && state.messages[0].role==="prospect"){
+    speakLine(state.messages[0].text);
+  }
 
   state.timer = setInterval(()=>{
     state.seconds++;
@@ -333,6 +371,7 @@ function showThinking(on){
 
 async function send(){
   if(state.thinking) return;
+  if(state.listening) stopMic();
   const input=document.getElementById("input");
   const text=input.value.trim();
   if(!text) return;
@@ -366,6 +405,88 @@ function pushProspect(text){
   state.messages.push({role:"prospect",text});
   const t=document.getElementById("transcript");
   if(t){ t.appendChild(makeBubble("prospect",text,state.active.leadName)); t.scrollTop=t.scrollHeight; }
+  speakLine(text);
+}
+
+/* ---------------- VOICE: output (lead reads lines) ---------------- */
+function updateVoiceToggle(){
+  const b=document.getElementById("voiceToggle");
+  if(!b) return;
+  b.classList.toggle("on", state.voiceOn);
+  b.setAttribute("aria-pressed", state.voiceOn?"true":"false");
+  b.innerHTML = (state.voiceOn?SPK_ON:SPK_OFF) + (state.voiceOn?" Lead voice on":" Lead voice off");
+}
+function speakLine(text){
+  if(!state.voiceOn) return;
+  if(!('speechSynthesis' in window)) return;
+  try{
+    window.speechSynthesis.cancel();
+    const clean=String(text).replace(/\u2026/g,"...").replace(/[*_`]/g,"");
+    const u=new SpeechSynthesisUtterance(clean);
+    u.rate=1.02; u.pitch=1; u.lang="en-US";
+    window.speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+/* ---------------- VOICE: input (mic -> text) ---------------- */
+function toggleMic(){
+  const micBtn=document.getElementById("micBtn");
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ showMicMsg("warn","Voice input isn't supported in this browser. Try Chrome or Edge, or type your reply."); return; }
+  if(state.listening){ stopMic(); return; }
+
+  recog=new SR();
+  recog.continuous=true; recog.interimResults=true; recog.lang="en-US";
+
+  const box=document.getElementById("input");
+  let base=box.value.trim();
+  base = base ? base+" " : "";
+  box.dataset.base=base;
+
+  recog.onresult=(e)=>{
+    let interim="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const tr=e.results[i][0].transcript;
+      if(e.results[i].isFinal){ box.dataset.base=(box.dataset.base||"")+tr+" "; }
+      else interim+=tr;
+    }
+    box.value=(box.dataset.base||"")+interim;
+    box.style.height="auto"; box.style.height=Math.min(box.scrollHeight,120)+"px";
+  };
+  recog.onerror=(e)=>{
+    if(e.error==="no-speech"||e.error==="aborted") return;
+    if(e.error==="not-allowed"||e.error==="service-not-allowed"){
+      showMicMsg("warn","Microphone is blocked here. Download this file and open it in Chrome to talk.");
+    } else { showMicMsg("warn","Voice input hit a snag — you can type instead."); }
+    stopMic();
+  };
+  recog.onend=()=>{ if(state.listening) stopMic(); };
+
+  try{ recog.start(); }
+  catch(err){ showMicMsg("warn","Couldn't start the mic — try again."); return; }
+
+  state.listening=true;
+  micBtn.classList.add("live");
+  micBtn.setAttribute("aria-pressed","true");
+  showMicMsg("live","Listening… tap the mic again to stop");
+}
+function stopMic(){
+  state.listening=false;
+  if(recog){ try{recog.stop();}catch(e){} }
+  const micBtn=document.getElementById("micBtn");
+  if(micBtn){ micBtn.classList.remove("live"); micBtn.setAttribute("aria-pressed","false"); }
+  const box=document.getElementById("input"); if(box) delete box.dataset.base;
+  const hint=document.getElementById("micHint"); if(hint){ hint.style.display="none"; hint.innerHTML=""; }
+}
+function showMicMsg(kind,msg){
+  const hint=document.getElementById("micHint");
+  if(!hint) return;
+  const dot = kind==="live" ? `<span style="width:8px;height:8px;border-radius:50%;background:${C.coral};animation:blink 1s infinite;flex:0 0 auto;"></span>`
+                            : `<span style="width:8px;height:8px;border-radius:50%;background:${C.gold};flex:0 0 auto;"></span>`;
+  hint.style.color = kind==="live" ? C.coral : C.gold;
+  hint.style.display="flex";
+  hint.innerHTML=dot+esc(msg);
+  if(kind!=="live"){ setTimeout(()=>{ if(!state.listening && hint){ hint.style.display="none"; hint.innerHTML=""; } },5500); }
 }
 
 /* ---------------- SCORE ---------------- */
