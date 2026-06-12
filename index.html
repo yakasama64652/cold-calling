@@ -199,7 +199,7 @@ const SPK_OFF = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" str
 
 /* ---------------- STATE ---------------- */
 const app = document.getElementById("app");
-let state = { view:"home", active:null, messages:[], thinking:false, seconds:0, timer:null, scoreData:null, listening:false, voiceOn:false };
+let state = { view:"home", active:null, messages:[], thinking:false, seconds:0, timer:null, scoreData:null, listening:false, voiceOn:false, offline:false, scoreOffline:false, fb:{} };
 let recog = null;
 
 document.getElementById("logoBtn").onclick = ()=>{ if(state.view!=="call") go("home"); };
@@ -221,6 +221,8 @@ function startCall(scn){
   state.messages = [{role:"prospect",text:scn.firstLine}];
   state.seconds = 0;
   state.scoreData = null;
+  state.scoreOffline = false;
+  state.fb = {mood:0, reveal:0, removed:false, booked:false, acked:false};
   go("call");
 }
 
@@ -274,6 +276,7 @@ function renderCall(){
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span id="modeInd" style="display:none;font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:#FBF3DF;color:${C.gold};border-radius:999px;padding:5px 10px;">Practice mode</span>
         <button id="voiceToggle" class="vtoggle" aria-pressed="false"></button>
         <span style="font-size:11.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;background:rgba(255,255,255,.14);border-radius:999px;padding:5px 11px;">${esc(s.num)} · ${esc(s.tag)}</span>
       </div>
@@ -333,6 +336,20 @@ function renderCall(){
   // mic input
   document.getElementById("micBtn").onclick = toggleMic;
 
+  // microphone-first: typing is off; you answer by voice
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(SR){
+    input.readOnly = true;
+    input.placeholder = "Tap the mic and speak your reply…";
+    sendBtn.style.display = "none";
+    showMicMsg("idle","Tap the mic to answer by voice");
+  } else {
+    enableTyping("Voice input isn't supported in this browser — type your reply instead.");
+  }
+
+  // keep practice-mode indicator visible if we already fell back earlier
+  if(state.offline){ const ind=document.getElementById("modeInd"); if(ind) ind.style.display="inline-block"; }
+
   // if the lead voice is on (e.g. on replay), speak the opening line
   if(state.voiceOn && state.messages.length===1 && state.messages[0].role==="prospect"){
     speakLine(state.messages[0].text);
@@ -371,10 +388,10 @@ function showThinking(on){
 
 async function send(){
   if(state.thinking) return;
-  if(state.listening) stopMic();
   const input=document.getElementById("input");
   const text=input.value.trim();
   if(!text) return;
+  const hint=document.getElementById("micHint"); if(hint) hint.style.display="none";
   state.messages.push({role:"va",text});
   const t=document.getElementById("transcript");
   t.appendChild(makeBubble("va",text,state.active.leadName));
@@ -384,28 +401,120 @@ async function send(){
   if(window._refreshEnd) window._refreshEnd();
   showThinking(true);
 
-  try{
-    const apiMsgs = state.messages.map(m=>({role:m.role==="va"?"user":"assistant",content:m.text}));
-    const trimmed = apiMsgs[0] && apiMsgs[0].role==="assistant" ? apiMsgs.slice(1) : apiMsgs;
-    const res = await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,system:state.active.persona,messages:trimmed})
-    });
-    const data = await res.json();
-    const reply = (data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join(" ").trim();
-    pushProspect(reply||"…(silence on the line)");
-  }catch(e){
-    pushProspect("…(the line crackled — try that again)");
-  }finally{
-    state.thinking=false;
-    showThinking(false);
+  let reply = "";
+  if(!state.offline){
+    try{
+      reply = await apiReply();
+    }catch(e){
+      state.offline = true;            // stop trying the API for the rest of the call
+      notifyPracticeMode();
+    }
+  }
+  if(state.offline || !reply){
+    reply = offlineReply(text);
+  }
+  state.thinking=false;
+  showThinking(false);
+  pushProspect(reply);
+  if(!state.typingEnabled && (window.SpeechRecognition||window.webkitSpeechRecognition)){
+    showMicMsg("idle","Tap the mic to answer by voice");
   }
 }
+
+async function apiReply(){
+  const apiMsgs = state.messages.map(m=>({role:m.role==="va"?"user":"assistant",content:m.text}));
+  const trimmed = apiMsgs[0] && apiMsgs[0].role==="assistant" ? apiMsgs.slice(1) : apiMsgs;
+  const res = await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,system:state.active.persona,messages:trimmed})
+  });
+  if(!res.ok) throw new Error("HTTP "+res.status);
+  const data = await res.json();
+  if(data && data.error) throw new Error(data.error.message||"api error");
+  const reply = (data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join(" ").trim();
+  if(!reply) throw new Error("empty");
+  return reply;
+}
+
+function notifyPracticeMode(){
+  const t=document.getElementById("transcript");
+  if(t && !document.getElementById("practiceNote")){
+    const n=document.createElement("div");
+    n.id="practiceNote";
+    n.className="fade";
+    n.style.cssText=`align-self:center;background:#FBF3DF;color:${C.gold};border:1px solid #EBD9A8;border-radius:999px;padding:5px 14px;font-size:11.5px;font-weight:700;letter-spacing:.3px;`;
+    n.textContent="PRACTICE MODE · live AI lead unavailable, using built-in responses";
+    t.appendChild(n);
+  }
+  const ind=document.getElementById("modeInd");
+  if(ind){ ind.textContent="Practice mode"; ind.style.display="inline-block"; }
+}
+
 function pushProspect(text){
   state.messages.push({role:"prospect",text});
   const t=document.getElementById("transcript");
   if(t){ t.appendChild(makeBubble("prospect",text,state.active.leadName)); t.scrollTop=t.scrollHeight; }
   speakLine(text);
+}
+
+/* ---------------- OFFLINE LEAD ENGINE (fallback when AI is unreachable) ---------------- */
+function has(t, arr){ t=" "+t.toLowerCase()+" "; return arr.some(w=>t.includes(w)); }
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+function offlineReply(text){
+  const f = state.fb || (state.fb={mood:0,reveal:0,removed:false,booked:false,acked:false});
+  const id = state.active.id;
+
+  if(id==="irate-no-future"){
+    const apolog=has(text,["sorry","apolog","didn't mean","my fault","understand","interrupt"]);
+    const respect=has(text,["quick","seconds","minute","won't take","brief","real quick"]);
+    const pushy=has(text,["offer","save you","great deal","sign up","policy","plan","interested","buy","product"]);
+    if(pushy && f.mood<1){ f.mood--; return pick(["I did not ask for a sales pitch. I'm about to hang up.","Are you even listening? I said I'm busy.","You're all the same. Get to the point or I'm gone."]); }
+    if(apolog || respect){ f.mood++;
+      if(f.mood>=2) return pick(["Alright… thirty seconds. Honestly my premium did jump this year, so make it count.","Fine. You're at least polite. What is this actually about?"]);
+      return pick(["…Okay. At least you're not shouting. What do you want?","Hm. Go on then — but be quick."]); }
+    return pick(["Who gave you this number? I'm in the middle of something.","I really don't have time for this right now.","What's this about? Make it fast."]);
+  }
+
+  if(id==="irate-remove"){
+    const comply=has(text,["remove","take you off","won't call","will not call","do not call","off the list","off our list","delete","take you off","take your number"]);
+    const pitch=has(text,["offer","save","policy","plan","coverage","interested","but ","however","just hear","one thing"]);
+    if(comply){ f.removed=true; return pick(["Good. Make sure you do. Thank you.","Fine. I appreciate that. Goodbye.","Thank you. That's all I wanted."]); }
+    if(pitch){ f.mood--; return pick(["I said take me off your list. Not interested in anything.","Did you not hear me? Remove my number. Now.","Stop pitching. Off the list. That's it."]); }
+    return pick(["Take me off your list and don't call again.","I don't want these calls. Remove my number.","I'm done with this — remove me from your list."]);
+  }
+
+  if(id==="interested-no-type"){
+    const question=text.includes("?")||has(text,["tell me","what kind","currently","right now","situation","looking for","covered","you work","family","depend","worried","protect"]);
+    const pitch=has(text,["we offer","our plan","our policy","i recommend","you should get","sign up","this product"]);
+    if(pitch && f.reveal<2) return pick(["Mm, maybe. I don't really know what I need yet, honestly.","I guess? Not sure that's the right fit for me."]);
+    if(question){
+      const reveals=[
+        "Well… I just went freelance, so I lost the cover I had through my old job.",
+        "I bought a small condo recently, and my partner kind of depends on my income.",
+        "I suppose my real worry is — if I got sick and couldn't work, we'd be in trouble. Nothing's in place for that.",
+        "Honestly? No life cover at all. I keep meaning to sort it and never do."
+      ];
+      const r=reveals[Math.min(f.reveal,reveals.length-1)]; f.reveal++; return r;
+    }
+    return pick(["Yeah, I've been meaning to look into insurance… just never got round to it.","Sure, I've got a minute. What did you want to know?"]);
+  }
+
+  if(id==="interested-later"){
+    const time=has(text,["tomorrow","afternoon","monday","tuesday","wednesday","thursday","friday","pm","am","o'clock","later today","call you","what time","good time"]);
+    const pushy=has(text,["let me explain","just quickly","two minutes","real quick","while i have you","right now","just hear"]);
+    if(f.booked) return pick(["Sounds good, talk then. Bye.","Great, looking forward to it — got to run."]);
+    if(time){ f.booked=true; return pick(["Late afternoon works — say tomorrow around 4. Lock it in.","That time's fine. Confirm it and I'll be ready."]); }
+    if(pushy){ f.mood--; return pick(["I really can't do this now — walking into a meeting.","I'm interested, but not this second. Can we not do this right now?"]); }
+    return pick(["This does sound useful, but you've caught me at a bad time.","I'd like to hear more — just not right now, I'm slammed."]);
+  }
+
+  // previously-contacted
+  const ack=has(text,["last time","before","previously","spoke","already","earlier","follow up","following up","apolog","sorry","again"]);
+  const oblivious=has(text,["first time","introduce","never","brand new","reaching out today","cold call"]);
+  if(oblivious && !f.acked){ f.mood--; return pick(["See, that's the problem — someone already called and nobody followed up.","You don't even know I've spoken to your company before? Not great."]); }
+  if(ack){ f.acked=true; return pick(["Oh — okay, so you do know. Right, it was about my home and contents cover.","Yes, that was it. Nobody got back to me, so I let it drop."]); }
+  return pick(["Wait — didn't someone from your company already call me a while back?","I think I already spoke to someone there. What's this about?"]);
 }
 
 /* ---------------- VOICE: output (lead reads lines) ---------------- */
@@ -428,20 +537,20 @@ function speakLine(text){
   }catch(e){}
 }
 
-/* ---------------- VOICE: input (mic -> text) ---------------- */
+/* ---------------- VOICE: input (mic -> text, mic-first) ---------------- */
 function toggleMic(){
   const micBtn=document.getElementById("micBtn");
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SR){ showMicMsg("warn","Voice input isn't supported in this browser. Try Chrome or Edge, or type your reply."); return; }
-  if(state.listening){ stopMic(); return; }
+  if(!SR){ enableTyping("Voice input isn't supported in this browser — type your reply instead."); return; }
+  if(state.thinking) return;
+  if(state.listening){ state.pendingSend=true; stopMic(); return; } // tap again => stop and send
 
   recog=new SR();
   recog.continuous=true; recog.interimResults=true; recog.lang="en-US";
 
   const box=document.getElementById("input");
-  let base=box.value.trim();
-  base = base ? base+" " : "";
-  box.dataset.base=base;
+  box.value=""; box.dataset.base="";
+  state.pendingSend=false; state.micFailed=false;
 
   recog.onresult=(e)=>{
     let interim="";
@@ -455,38 +564,58 @@ function toggleMic(){
   };
   recog.onerror=(e)=>{
     if(e.error==="no-speech"||e.error==="aborted") return;
+    state.micFailed=true;
     if(e.error==="not-allowed"||e.error==="service-not-allowed"){
-      showMicMsg("warn","Microphone is blocked here. Download this file and open it in Chrome to talk.");
-    } else { showMicMsg("warn","Voice input hit a snag — you can type instead."); }
-    stopMic();
+      enableTyping("Microphone is blocked here. Allow mic access, or download this file and open it in Chrome — meanwhile you can type.");
+    } else {
+      enableTyping("Voice input hit a snag — type your reply instead.");
+    }
   };
-  recog.onend=()=>{ if(state.listening) stopMic(); };
+  recog.onend=()=>{
+    state.listening=false;
+    if(micBtn){ micBtn.classList.remove("live"); micBtn.setAttribute("aria-pressed","false"); }
+    const text=(box.value||"").trim();
+    if(state.micFailed){ state.micFailed=false; state.pendingSend=false; return; }
+    if(state.pendingSend && text){ state.pendingSend=false; send(); }
+    else { state.pendingSend=false; showMicMsg("idle","Tap the mic to answer by voice"); }
+  };
 
   try{ recog.start(); }
-  catch(err){ showMicMsg("warn","Couldn't start the mic — try again."); return; }
+  catch(err){ enableTyping("Couldn't start the mic — type your reply instead."); return; }
 
   state.listening=true;
   micBtn.classList.add("live");
   micBtn.setAttribute("aria-pressed","true");
-  showMicMsg("live","Listening… tap the mic again to stop");
+  showMicMsg("live","Listening… speak, then tap the mic to send");
 }
 function stopMic(){
-  state.listening=false;
   if(recog){ try{recog.stop();}catch(e){} }
-  const micBtn=document.getElementById("micBtn");
-  if(micBtn){ micBtn.classList.remove("live"); micBtn.setAttribute("aria-pressed","false"); }
-  const box=document.getElementById("input"); if(box) delete box.dataset.base;
-  const hint=document.getElementById("micHint"); if(hint){ hint.style.display="none"; hint.innerHTML=""; }
+  // onend handles UI + send; if recognition never started, reset here
+  if(!recog){ state.listening=false; }
+}
+function enableTyping(msg){
+  state.typingEnabled=true;
+  if(state.listening){ try{recog && recog.abort();}catch(e){} state.listening=false; }
+  const box=document.getElementById("input");
+  if(box){ box.readOnly=false; box.placeholder="Type what you'd say on the call…"; }
+  const sb=document.getElementById("sendBtn"); if(sb) sb.style.display="";
+  const micBtn=document.getElementById("micBtn"); if(micBtn){ micBtn.classList.remove("live"); micBtn.setAttribute("aria-pressed","false"); }
+  if(msg) showMicMsg("warn",msg);
+  if(box) box.focus();
 }
 function showMicMsg(kind,msg){
   const hint=document.getElementById("micHint");
   if(!hint) return;
-  const dot = kind==="live" ? `<span style="width:8px;height:8px;border-radius:50%;background:${C.coral};animation:blink 1s infinite;flex:0 0 auto;"></span>`
-                            : `<span style="width:8px;height:8px;border-radius:50%;background:${C.gold};flex:0 0 auto;"></span>`;
-  hint.style.color = kind==="live" ? C.coral : C.gold;
+  const colors={live:C.coral, warn:C.gold, idle:C.muted};
+  const col=colors[kind]||C.muted;
+  const dot = kind==="live"
+    ? `<span style="width:8px;height:8px;border-radius:50%;background:${C.coral};animation:blink 1s infinite;flex:0 0 auto;"></span>`
+    : `<span style="width:8px;height:8px;border-radius:50%;background:${col};flex:0 0 auto;"></span>`;
+  hint.style.color=col;
+  hint.style.fontWeight = kind==="idle" ? "500" : "600";
   hint.style.display="flex";
   hint.innerHTML=dot+esc(msg);
-  if(kind!=="live"){ setTimeout(()=>{ if(!state.listening && hint){ hint.style.display="none"; hint.innerHTML=""; } },5500); }
+  if(kind==="warn"){ setTimeout(()=>{ if(!state.listening && hint){ if(state.typingEnabled){ hint.style.display="none"; } else { showMicMsg("idle","Tap the mic to answer by voice"); } } },6000); }
 }
 
 /* ---------------- SCORE ---------------- */
@@ -513,28 +642,91 @@ Grade the CALLER only. If the call was very short, grade what evidence exists an
 Respond with ONLY valid JSON, no markdown, no preamble, in exactly this shape:
 {"criteria":[{"name":"Opening & Introduction","score":0,"feedback":"1 short sentence"},{"name":"Rapport & Active Listening","score":0,"feedback":"..."},{"name":"Needs Assessment & Discovery","score":0,"feedback":"..."},{"name":"Product Pitch & Solution","score":0,"feedback":"..."},{"name":"Objection Handling","score":0,"feedback":"..."},{"name":"Closing & Next Steps","score":0,"feedback":"..."}],"strength":"one specific thing they did well","fix":"the single highest-impact fix","summary":"2 sentence overall verdict"}`;
 
-  try{
-    const res = await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:prompt}]})
-    });
-    const data = await res.json();
-    let raw = (data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("").trim();
-    raw = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
-    const start=raw.indexOf("{"), end=raw.lastIndexOf("}");
-    if(start>=0) raw=raw.slice(start,end+1);
-    const parsed = JSON.parse(raw);
-    const merged = RUBRIC.map(r=>{
-      const f=(parsed.criteria||[]).find(c=>c.name===r.name)||{};
-      const score=Math.max(0,Math.min(5,Number(f.score)||0));
-      return {...r,score,feedback:f.feedback||""};
-    });
-    const total = Math.round(merged.reduce((sum,c)=>sum+(c.score/5)*c.weight,0));
-    state.scoreData = {criteria:merged,total,strength:parsed.strength,fix:parsed.fix,summary:parsed.summary};
-    renderScore();
-  }catch(e){
-    renderScoreError();
+  let parsed = null;
+  if(!state.offline){
+    try{
+      const res = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:prompt}]})
+      });
+      if(!res.ok) throw new Error("HTTP "+res.status);
+      const data = await res.json();
+      if(data && data.error) throw new Error("api");
+      let raw = (data.content||[]).filter(c=>c.type==="text").map(c=>c.text).join("").trim();
+      raw = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+      const start=raw.indexOf("{"), end=raw.lastIndexOf("}");
+      if(start>=0) raw=raw.slice(start,end+1);
+      parsed = JSON.parse(raw);
+    }catch(e){ parsed = null; }
   }
+  if(!parsed){ parsed = offlineScore(); state.scoreOffline = true; }
+
+  const merged = RUBRIC.map(r=>{
+    const f=(parsed.criteria||[]).find(c=>c.name===r.name)||{};
+    const score=Math.max(0,Math.min(5,Number(f.score)||0));
+    return {...r,score,feedback:f.feedback||""};
+  });
+  const total = Math.round(merged.reduce((sum,c)=>sum+(c.score/5)*c.weight,0));
+  state.scoreData = {criteria:merged,total,strength:parsed.strength,fix:parsed.fix,summary:parsed.summary};
+  renderScore();
+}
+
+/* ---------------- OFFLINE SCORER (heuristic fallback) ---------------- */
+function offlineScore(){
+  const va = state.messages.filter(m=>m.role==="va").map(m=>m.text.toLowerCase());
+  const turns = va.length;
+  const all = va.join("  ");
+  const id = state.active.id;
+  const hit = arr => arr.some(w=>all.includes(w));
+  const questions = (all.match(/\?/g)||[]).length;
+
+  const introduced = hit(["my name","this is","i'm calling from","calling from","i'm with","i work with","with lava"]);
+  const greeted = hit(["hi","hello","good morning","good afternoon","how are you"]);
+  const empathy = hit(["understand","appreciate","sorry","apolog","i hear you","makes sense","that's fair","i get it"]);
+  const discovery = questions>=2 || hit(["what kind","tell me","currently","right now","situation","how do you","are you covered","what matters","your family","depend"]);
+  const benefit = hit(["protect","peace of mind","cover you","so you","help you","save","this would mean","that way you","income"]);
+  const argued = hit(["calm down","listen to me","let me finish","you need to","you have to","just listen"]);
+  const respected = hit(["remove","take you off","won't call","will not call","of course","absolutely","no problem","i'll take you off"]);
+  const nextStep = hit(["follow up","call you back","send you","email you","schedule","what time","tomorrow","appointment","set up a","book"]);
+  const removeScenario = (id==="irate-remove");
+  const laterScenario = (id==="interested-later");
+
+  function band(good, ok){ if(good) return 4+(Math.random()<.4?1:0); if(ok) return 3; return turns>=2?2:1; }
+
+  const crit = {
+    "Opening & Introduction": band(introduced && greeted, introduced||greeted),
+    "Rapport & Active Listening": band(empathy && questions>=1 && !argued, empathy||questions>=1),
+    "Needs Assessment & Discovery": band(discovery && questions>=2, discovery||questions>=1),
+    "Product Pitch & Solution": band(benefit && !hit(["jargon"]), benefit),
+    "Objection Handling": removeScenario
+        ? band(respected && !hit(["but i","however"]), respected)
+        : band(empathy && !argued, !argued),
+    "Closing & Next Steps": laterScenario
+        ? band(nextStep && hit(["tomorrow","afternoon","time","4","3","5"]), nextStep)
+        : band(nextStep, hit(["thank you","take care","have a good"]))
+  };
+  if(removeScenario){ crit["Closing & Next Steps"] = respected ? 4 : 2; }
+
+  const fb = {
+    "Opening & Introduction": introduced?"Identified yourself clearly — keep the energy high and lead with a reason to stay on the line.":"Open by stating who you are and the company up front, then a one-line reason for the call.",
+    "Rapport & Active Listening": (empathy)?"Good acknowledgement of the prospect — keep mirroring their words back.":"Acknowledge what they say before responding; ask, then listen rather than pushing.",
+    "Needs Assessment & Discovery": (discovery)?"You asked questions to dig in — go one layer deeper into the specific gap.":"Ask open questions about their current cover and worries before offering anything.",
+    "Product Pitch & Solution": (benefit)?"You tied the offer to a benefit — name the exact need it solves.":"Frame the product around their stated need and the outcome, not features.",
+    "Objection Handling": argued?"Avoid pushing back hard — acknowledge first, then respond calmly.":(respected?"You respected their wishes — that's the right call.":"Acknowledge objections without arguing, then offer a brief, calm response."),
+    "Closing & Next Steps": nextStep?"You moved toward a next step — make it specific with a day and time.":"End by asking for a small, concrete commitment or a set follow-up time."
+  };
+
+  const criteria = RUBRIC.map(r=>({name:r.name, score:crit[r.name], feedback:fb[r.name]}));
+  const top = criteria.slice().sort((a,b)=>b.score-a.score)[0];
+  const low = criteria.slice().sort((a,b)=>a.score-b.score)[0];
+  return {
+    criteria,
+    strength: `Your strongest area was ${top.name.toLowerCase()}.`,
+    fix: fb[low.name],
+    summary: turns<2
+      ? "Very short call, so this is a rough estimate — keep the conversation going longer to get a fuller read."
+      : "Estimated from the call's keywords and structure. Treat it as a directional guide rather than a precise grade."
+  };
 }
 
 function renderScoring(){
@@ -587,6 +779,7 @@ function renderScore(){
           <span style="font-size:20px;opacity:.7;">/ 100</span>
         </div>
         <span style="display:inline-block;margin-top:8px;background:${overall.color};border-radius:999px;padding:4px 13px;font-size:12.5px;font-weight:700;">${overall.label}</span>
+        ${state.scoreOffline?`<div style="margin-top:10px;font-size:11px;font-weight:600;letter-spacing:.3px;opacity:.75;">Estimated locally · AI scorer unavailable</div>`:``}
       </div>
       <p style="flex:1;min-width:220px;font-size:14.5px;line-height:1.55;opacity:.92;margin:0;">${esc(d.summary)}</p>
     </div>
